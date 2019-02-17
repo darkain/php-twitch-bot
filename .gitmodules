@@ -1,0 +1,6 @@
+[submodule "pudl"]
+	path = pudl
+	url = git@github.com:darkain/pudl.git
+[submodule "altaform-core"]
+	path = altaform-core
+	url = git@github.com:darkain/altaform-core.git
