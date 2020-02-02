@@ -145,7 +145,11 @@ while (true) {
 	if (socket_recv($socket, $out, 2048, MSG_DONTWAIT)) {
 		$buffer .= $out;
 		while (($pos = strpos($buffer, "\n")) !== false) {
-			twitch_command($pudl, trim(substr($buffer, 0, $pos)));
+			try {
+				twitch_command($pudl, trim(substr($buffer, 0, $pos)));
+			} catch (pudlException $e) {
+				var_dump($e);
+			}
 			$buffer = substr($buffer, $pos+1);
 		}
 	}
