@@ -23,59 +23,83 @@ require_once('pudl/pudl.php');
 $pudl = pudl::instance($pudl_config);
 
 
+
+
+////////////////////////////////////////////////////////////////////////////////
 // CREATE DATABASE TABLES IF THEY DON'T ALREADY EXIST
+////////////////////////////////////////////////////////////////////////////////
 $pudl('CREATE TABLE IF NOT EXISTS `users` (`user` INTEGER PRIMARY KEY, `uname` TEXT UNIQUE)');
 $pudl('CREATE TABLE IF NOT EXISTS `channels` (`channel` INTEGER PRIMARY KEY, `cname` TEXT UNIQUE)');
 $pudl('CREATE TABLE IF NOT EXISTS `chatlog` (`log` INTEGER PRIMARY KEY, `user` INT NOT NULL, `channel` INT NOT NULL, `timestamp` INT NOT NULL, `chat` TEXT)');
 
 
+
+
+////////////////////////////////////////////////////////////////////////////////
 // SEND DATA TO TWITCH
-function twitch_send($buffer) {
-	global $socket;
+////////////////////////////////////////////////////////////////////////////////
+function twitch_send($socket, $buffer) {
 	$buffer = trim($buffer);
 //	echo afCli::fgCyan($buffer) . "\n";
 	return socket_write($socket, $buffer."\n", strlen($buffer)+1);
 }
 
 
-// CREATE SOCKET
-if (($socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)) === false) {
-	echo	"socket_create() failed: reason: "
-			. socket_strerror(socket_last_error())
-			. "\n";
-	exit(1);
+
+
+////////////////////////////////////////////////////////////////////////////////
+// CONNECT TO TWITCH
+////////////////////////////////////////////////////////////////////////////////
+function twitch_connect($config, $channels) {
+
+	// CREATE SOCKET
+	if (($socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP)) === false) {
+		echo	"socket_create() failed: reason: "
+				. socket_strerror(socket_last_error())
+				. "\n";
+		exit(1);
+	}
+
+
+	// CONNECT SOCKET TO TWITCH
+	if (socket_connect($socket, $config['address'], $config['port']) === false) {
+		echo	  "socket_connect() failed: reason: "
+				. socket_strerror(socket_last_error($socket))
+				. "\n";
+		exit(1);
+	}
+
+
+	// SEND USERNAME AND PASSWORD INFORMATION
+	twitch_send($socket, 'PASS ' . $config['password']);
+	twitch_send($socket, 'NICK ' . strtolower($config['username']));
+
+
+	// JOIN CHANNELS
+	foreach ($channels as $channel) {
+		twitch_send($socket, 'JOIN #' . strtolower($channel));
+	}
+
+	// SET NON-BLOCKING I/O
+	socket_set_nonblock($socket);
+
+	return $socket;
 }
 
 
-// CONNECT SOCKET TO TWITCH
-if (socket_connect($socket, $twitch_config['address'], $twitch_config['port']) === false) {
-	echo	  "socket_connect() failed: reason: "
-			. socket_strerror(socket_last_error($socket))
-			. "\n";
-	exit(1);
-}
 
 
-// SEND USERNAME AND PASSWORD INFORMATION
-twitch_send('PASS ' . $twitch_config['password']);
-twitch_send('NICK ' . strtolower($twitch_config['username']));
-
-
-// JOIN CHANNELS
-foreach ($twitch_channels as $channel) {
-	twitch_send('JOIN #' . strtolower($channel));
-}
-
-
+////////////////////////////////////////////////////////////////////////////////
 // PROCESS A COMMAND FROM TWITCH
-function twitch_command($pudl, $command) {
+////////////////////////////////////////////////////////////////////////////////
+function twitch_command($socket, $pudl, $command) {
 	echo afCli::fgYellow($command) . "\n";
 	$parts = explode(' ', $command, 4);
 	if (strtoupper($parts[0]) === 'PING') {
 		if (count($parts) > 1) {
-			twitch_send('PONG ' . $parts[1]);
+			twitch_send($socket, 'PONG ' . $parts[1]);
 		} else {
-			twitch_send('PONG');
+			twitch_send($socket, 'PONG');
 		}
 	}
 
@@ -86,7 +110,10 @@ function twitch_command($pudl, $command) {
 
 
 
+
+////////////////////////////////////////////////////////////////////////////////
 // LOG A CHAT MESSAGE INTO THE DATABASE
+////////////////////////////////////////////////////////////////////////////////
 function chat($pudl, $parts) {
 	static $channels	= [];
 	static $users		= [];
@@ -131,22 +158,39 @@ function chat($pudl, $parts) {
 
 // ENABLE NON-BLOCKING I/O
 stream_set_blocking(STDIN, false);
-socket_set_nonblock($socket);
 
 
 // INITIALIZE STATE
 $buffer	= '';
+$sleep	= 1;
 $pudl->begin();
 
 
+
+
+////////////////////////////////////////////////////////////////////////////////
+// MAIN PROGRAM LOOP
+////////////////////////////////////////////////////////////////////////////////
 while (true) {
 
+	// (RE)CONNECT IF WE'RE NOT CURRENTLY CONNECTED
+	if (empty($socket)) {
+		print("Connecting to Twitch...\n");
+		$buffer = '';
+		$socket = twitch_connect($twitch_config, $twitch_channels);
+		if (empty($socket)) {
+			$sleep <<= 1;
+			sleep($sleep);
+			continue;
+		}
+	}
+
 	// READ FROM SERVER, PROCESS DATA
-	if (socket_recv($socket, $out, 2048, MSG_DONTWAIT)) {
+	if ($status = socket_recv($socket, $out, 2048, MSG_DONTWAIT)) {
 		$buffer .= $out;
 		while (($pos = strpos($buffer, "\n")) !== false) {
 			try {
-				twitch_command($pudl, trim(substr($buffer, 0, $pos)));
+				twitch_command($socket, $pudl, trim(substr($buffer, 0, $pos)));
 			} catch (pudlException $e) {
 				var_dump($e);
 			}
@@ -154,12 +198,21 @@ while (true) {
 		}
 	}
 
+	// HANDLE SOCKET ERRORS (THIS WILL CAUSE A RECONNECT)
+	if ( ($status === false)  &&  (socket_last_error() !== 35) ) {
+		echo 'Socket error: ' . socket_last_error() . ' : ' . socket_strerror(socket_last_error());
+		socket_close($socket);
+		$socket	= NULL;
+		$sleep	= 1;
+		continue;
+	}
+
 	// READ FROM LOCAL CONSOLE, SEND TYPED COMMAND TO SERVER
 	if ($input = fread(STDIN, 2048)) {
 		if (in_array(strtoupper(trim($input)), ['EXIT', 'QUIT'])) {
 			break;
 		}
-		twitch_send($input);
+		twitch_send($socket, $input);
 	}
 
 
